@@ -414,6 +414,7 @@ int main_guarded(int argc, char **argv) {
   settings.add_int("Seed","Random number seed",0);
   settings.add_bool("Debug","Print out line search every iteration",false);
   settings.add_int("NumCore","Number of atomic core orbitals (localized separately from valence)",0);
+  settings.add_bool("OrthCheck","Check the orthonormality of orbitals in LoadChk (set to 'true' if possible!)",true);
   settings.parse(argv[1]);
   settings.print();
 
@@ -425,6 +426,8 @@ int main_guarded(int argc, char **argv) {
   std::string logfile=settings.get_string("Logfile");
   bool virt=settings.get_bool("Virtual");
   int seed=settings.get_int("Seed");
+
+  bool orthCheck=settings.get_bool("OrthCheck");
 
   int ncore=settings.get_int("NumCore");
 
@@ -537,7 +540,8 @@ int main_guarded(int argc, char **argv) {
       chkpt.read("H",H);
 
     // Check orthogonality
-    check_orth(C,basis.overlap(),false);
+    if(orthCheck)
+      check_orth(C,basis.overlap(),false);
 
     // Occupation numbers
     std::vector<double> occs;
@@ -574,9 +578,10 @@ int main_guarded(int argc, char **argv) {
     }
 
     // Check orthogonality
+    if(orthCheck){
     check_orth(Ca,basis.overlap(),false);
     check_orth(Cb,basis.overlap(),false);
-
+    }
     // Occupation numbers
     std::vector<double> occa, occb;
     chkpt.read("occa",occa);
