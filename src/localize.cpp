@@ -325,9 +325,9 @@ void print_localize_msg(size_t start_idx, size_t stop_idx, bool delocalize){
     printf("\n");
 }
 
-void localize(const BasisSet & basis, arma::mat & C, arma::vec & E, const arma::mat & P, const arma::mat & H, std::vector<double> occs, bool virt, enum locmet method, enum unitmethod umet, enum unitacc acc, enum startingpoint start, bool delocalize, std::string sizedist, bool size, std::string fname, double Gthr, double Fthr, int maxiter, unsigned long int seed, bool debug, int ncore, int nel) {
+void localize(const BasisSet & basis, arma::mat & C, arma::vec & E, const arma::mat & P, const arma::mat & H, std::vector<double> occs, bool virt, enum locmet method, enum unitmethod umet, enum unitacc acc, enum startingpoint start, bool delocalize, std::string sizedist, bool size, std::string fname, double Gthr, double Fthr, int maxiter, unsigned long int seed, bool debug, int ncore, int nel, bool skipCore) {
   // Run localization, occupied core space
-  if(ncore) {
+  if(ncore && skipCore == false) {
     arma::subview<double> C_core = C.cols(0,ncore-1);
     arma::subview_col<double> E_core = E.subvec(0,ncore-1);
 
@@ -414,7 +414,9 @@ int main_guarded(int argc, char **argv) {
   settings.add_int("Seed","Random number seed",0);
   settings.add_bool("Debug","Print out line search every iteration",false);
   settings.add_int("NumCore","Number of atomic core orbitals (localized separately from valence)",0);
+  settings.add_bool("SkipCore","skip localization of the core orbitals?",false);
   settings.add_bool("OrthCheck","Check the orthonormality of orbitals in LoadChk (set to 'true' if possible!)",true);
+  settings.add_bool("SingleOccSep","Localize the singly-occupied orbitals separately from the doubly occupied (Note: only changes ERKALE behavior if Restricted is 'True')",true);
   settings.parse(argv[1]);
   settings.print();
 
@@ -428,7 +430,9 @@ int main_guarded(int argc, char **argv) {
   int seed=settings.get_int("Seed");
 
   bool orthCheck=settings.get_bool("OrthCheck");
-
+  
+  bool singleOcc=settings.get_bool("SingleOccSep");
+  bool skipCore=settings.get_bool("SkipCore");
   int ncore=settings.get_int("NumCore");
 
   std::string loadname(settings.get_string("LoadChk"));
@@ -550,12 +554,19 @@ int main_guarded(int argc, char **argv) {
     // Electron Number
     int nela;
     chkpt.read("Nel-a",nela);
+    int nelb;
+    chkpt.read("Nel-b",nelb);
 
     if (ncore > nela)
       throw std::runtime_error("NumCore must not exceed the number of electrons\n");
 
     // Run localization
-    localize(basis,C,E,P,H,occs,virt,method,umet,acc,start,delocalize,sizedist,size,logfile,Gthr,Fthr,maxiter,seed,debug,ncore,nela);
+    if (singleOcc != true){
+      localize(basis,C,E,P,H,occs,virt,method,umet,acc,start,delocalize,sizedist,size,logfile,Gthr,Fthr,maxiter,seed,debug,ncore,nela,skipCore);
+    } else {
+      localize(basis,C,E,P,H,occs,false,method,umet,acc,start,delocalize,sizedist,size,logfile,Gthr,Fthr,maxiter,seed,debug,ncore,nelb,skipCore); // localize core (if desired), and doubly occupied
+      localize(basis,C,E,P,H,occs,virt,method,umet,acc,start,delocalize,sizedist+".so.",size,logfile,Gthr,Fthr,maxiter,seed,debug,nelb,nela,true); // localize single occupied, and virtual sectors
+    }
 
     chkpt.write("C",C);
     chkpt.write("E",E);
@@ -596,8 +607,8 @@ int main_guarded(int argc, char **argv) {
       throw std::runtime_error("NumCore must not exceed the number of electrons\n");
 
     // Run localization
-    localize(basis,Ca,Ea,P,Ha,occa,virt,method,umet,acc,start,delocalize,sizedist+".a",size,logfile+".a",Gthr,Fthr,maxiter,seed,debug,ncore,nela);
-    localize(basis,Cb,Eb,P,Hb,occb,virt,method,umet,acc,start,delocalize,sizedist+".b",size,logfile+".b",Gthr,Fthr,maxiter,seed,debug,ncore,nelb);
+    localize(basis,Ca,Ea,P,Ha,occa,virt,method,umet,acc,start,delocalize,sizedist+".a",size,logfile+".a",Gthr,Fthr,maxiter,seed,debug,ncore,nela,skipCore);
+    localize(basis,Cb,Eb,P,Hb,occb,virt,method,umet,acc,start,delocalize,sizedist+".b",size,logfile+".b",Gthr,Fthr,maxiter,seed,debug,ncore,nelb,skipCore);
 
     chkpt.write("Ca",Ca);
     chkpt.write("Cb",Cb);
@@ -616,3 +627,4 @@ int main(int argc, char **argv) {
     return 1;
   }
 }
+
