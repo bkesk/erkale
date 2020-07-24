@@ -5,8 +5,8 @@
  *                             -
  *                       HF/DFT from Hel
  *
- * Written by Susi Lehtola, 2010-2011
- * Copyright (c) 2010-2011, Susi Lehtola
+ * Written by Susi Lehtola, 2010-2019
+ * Copyright (c) 2010-2019, Susi Lehtola
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -18,12 +18,13 @@
 #include "../stringutil.h"
 #include "../eriworker.h"
 #include "../settings.h"
+#include "pivoted_cholesky_basis.h"
 #include "../completeness/completeness_profile.h"
 #ifdef SVNRELEASE
 #include "../version.h"
 #endif
 
-std::string cmds[]={"cholesky", "completeness", "composition", "daug", "decontract", "densityfit", "dump", "dumpdec", "genbas", "merge", "norm", "orth", "overlap", "Porth", "prodset", "save", "savecfour", "savedalton", "savemolpro", "sort", "taug"};
+std::string cmds[]={"augdiffuse", "augsteep", "cholesky", "choleskybasis", "completeness", "composition", "daug", "decontract", "densityfit", "dump", "dumpdec", "genbas", "gendecbas", "merge", "norm", "orth", "overlap", "Porth", "prodset", "save", "savecfour", "savedalton", "savemolpro", "sort", "taug"};
 
 
 void help() {
@@ -58,11 +59,39 @@ int main_guarded(int argc, char **argv) {
   // Get command
   std::string cmd(argv[2]);
   // and determine what to do.
-  if(stricmp(cmd,"cholesky")==0) {
-    // Print completeness profile.
+  if(stricmp(cmd,"augdiffuse")==0) {
+    // Augment basis set
+
+    if(argc!=5) {
+      printf("\nUsage: %s input.gbs %s nexp output.gbs\n",argv[0],tolower(cmd).c_str());
+      return 1;
+    }
+
+    int naug=atoi(argv[3]);
+    std::string fileout(argv[4]);
+
+    bas.augment_diffuse(naug);
+    bas.save_gaussian94(fileout);
+
+  } else if(stricmp(cmd,"augsteep")==0) {
+    // Augment basis set
+
+    if(argc!=5) {
+      printf("\nUsage: %s input.gbs %s nexp output.gbs\n",argv[0],tolower(cmd).c_str());
+      return 1;
+    }
+
+    int naug=atoi(argv[3]);
+    std::string fileout(argv[4]);
+
+    bas.augment_steep(naug);
+    bas.save_gaussian94(fileout);
+
+  } else if(stricmp(cmd,"cholesky")==0) {
+    // Form Cholesky fitting basis set
 
     if(argc!=7) {
-      printf("\nUsage: %s input.gbs cholesky thr maxam ovlthr output.gbs\n",argv[0]);
+      printf("\nUsage: %s input.gbs cholesky thr maxam cholthr output.gbs\n",argv[0]);
       return 1;
     }
 
@@ -78,6 +107,22 @@ int main_guarded(int argc, char **argv) {
 
     init_libint_base();
     BasisSetLibrary ret=bas.cholesky_set(thr,maxam,ovlthr);
+    ret.save_gaussian94(outfile);
+
+  } else if(stricmp(cmd,"choleskybasis")==0) {
+    if(argc!=7) {
+      printf("\nUsage: %s input.gbs choleskybasis system.xyz thr uselm output.gbs\n",argv[0]);
+      return 1;
+    }
+
+    std::vector<atom_t> atoms=load_xyz(argv[3],false);
+    double thr(atof(argv[4]));
+    int uselm(atof(argv[5]));
+    std::string outfile(argv[6]);
+    settings.add_scf_settings();
+    settings.set_bool("UseLM",uselm);
+
+    BasisSetLibrary ret=pivoted_cholesky_basis(atoms,bas,thr);
     ret.save_gaussian94(outfile);
 
   } else if(stricmp(cmd,"completeness")==0) {
@@ -98,7 +143,7 @@ int main_guarded(int argc, char **argv) {
     ElementBasisSet elbas=bas.get_element(el);
 
     // Compute completeness profile
-    compprof_t prof=compute_completeness(elbas,-10.0,10.0,2001,coulomb);
+    compprof_t prof=compute_completeness(elbas,-10.0,15.0,3001,coulomb);
 
     // Print profile in output file
     FILE *out=fopen(fileout.c_str(),"w");
@@ -208,7 +253,7 @@ int main_guarded(int argc, char **argv) {
       naug=2;
 
     std::string fileout(argv[3]);
-    bas.augment(naug);
+    bas.augment_diffuse(naug);
     bas.save_gaussian94(fileout);
   } else if(stricmp(cmd,"decontract")==0) {
   // Decontract basis set.
@@ -332,6 +377,66 @@ int main_guarded(int argc, char **argv) {
 	throw std::runtime_error(oss.str());
       }
     }
+    elbas.sort();
+    elbas.save_gaussian94(fileout);
+
+  } else if(stricmp(cmd,"gendecbas")==0) {
+    // Generate decontracted basis set for xyz file
+
+    if(argc!=5) {
+      printf("\nUsage: %s input.gbs gendecbas system.xyz output.gbs\n",argv[0]);
+      return 1;
+    }
+
+    // Load atoms from xyz file
+    std::vector<atom_t> atoms=load_xyz(argv[3],false);
+    // Output file
+    std::string fileout(argv[4]);
+    // Save output
+    BasisSetLibrary elbas;
+
+    // Collect elements
+    std::vector<ElementBasisSet> els=bas.get_elements();
+    // Loop over atoms in system
+    for(size_t iat=0;iat<atoms.size();iat++) {
+      bool found=false;
+
+      // First, check if there is a special basis for the atom.
+      for(size_t iel=0;iel<els.size();iel++)
+	if(stricmp(atoms[iat].el,els[iel].get_symbol())==0 && atoms[iat].num == els[iel].get_number()) {
+	  // Yes, add it.
+	  elbas.add_element(els[iel]);
+	  found=true;
+	  break;
+	}
+
+      // Otherwise, check if a general basis is already in the basis
+      if(!found) {
+	std::vector<ElementBasisSet> added=elbas.get_elements();
+	for(size_t j=0;j<added.size();j++)
+	  if(added[j].get_number()==0 && stricmp(atoms[iat].el,added[j].get_symbol())==0)
+	    found=true;
+      }
+
+      // If general basis not found, add it.
+      if(!found) {
+	for(size_t iel=0;iel<els.size();iel++)
+	  if(stricmp(atoms[iat].el,els[iel].get_symbol())==0 && els[iel].get_number()==0) {
+	    // Yes, add it.
+	    elbas.add_element(els[iel]);
+	    found=true;
+	    break;
+	  }
+      }
+
+      if(!found) {
+	std::ostringstream oss;
+	oss << "Basis set for element " << atoms[iat].el << " does not exist in " << filein << "!\n";
+	throw std::runtime_error(oss.str());
+      }
+    }
+    elbas.decontract();
+    elbas.sort();
     elbas.save_gaussian94(fileout);
 
   } else if(stricmp(cmd,"merge")==0) {

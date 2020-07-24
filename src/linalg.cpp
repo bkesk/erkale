@@ -110,9 +110,38 @@ arma::mat CanonicalOrth(const arma::mat & S, double cutoff) {
   return CanonicalOrth(Svec,Sval,cutoff);
 }
 
+arma::mat PartialCholeskyOrth(const arma::mat & S, double cholcut, double scut) {
+  // Partial Cholesky orthogonalization
+  if(S.n_cols != S.n_rows) {
+    ERROR_INFO();
+    std::ostringstream oss;
+    oss << "Cannot orthogonalize non-square matrix!\n";
+    throw std::runtime_error(oss.str());
+  }
+
+  // Off-diagonal S
+  arma::mat odS(arma::abs(S));
+  odS.diag().zeros();
+  // Column sum
+  arma::vec odSs(arma::sum(S).t());
+  arma::uvec pivot = arma::stable_sort_index(odSs,"ascend");
+  // Find suitable basis by partial Cholesky decomposition
+  pivoted_cholesky(S,cholcut,pivot);
+
+  // Canonical orthogonalization of subbasis
+  arma::mat Ssub(S(pivot,pivot));
+  arma::mat Xsub(CanonicalOrth(Ssub,scut));
+
+  arma::mat X(S.n_rows,Xsub.n_cols,arma::fill::zeros);
+  X.rows(pivot)=Xsub;
+  return X;
+}
+
 arma::mat BasOrth(const arma::mat & S, bool verbose) {
   // Symmetric if possible, otherwise canonical. Default cutoff
   const double tol=settings.get_double("LinDepThresh");
+  // Cholesky threshold
+  const double chtol=settings.get_double("CholDepThresh");
 
   // Eigendecomposition of S: eigenvalues and eigenvectors
   arma::vec Sval;
@@ -121,11 +150,17 @@ arma::mat BasOrth(const arma::mat & S, bool verbose) {
   eig_sym_ordered(Sval,Svec,S);
 
   if(verbose) {
-    printf("Smallest eigenvalue of overlap matrix is %.2e, ratio to largest is %.2e.\n",Sval(0),Sval(0)/Sval(Sval.n_elem-1));
+    printf("Smallest eigenvalue of overlap matrix is %.2e, reciprocal condition number is %.2e.\n",Sval(0),Sval(0)/Sval(Sval.n_elem-1));
   }
 
-  // Check smallest eigenvalue.
-  if(Sval(0)>=tol) {
+  // Check condition number
+  if(Sval(0)/Sval(Sval.n_elem-1) <= DBL_EPSILON) {
+    if(verbose) printf("Using partial Cholesky orthogonalization (doi: 10.1063/1.5139948).\n");
+
+    return PartialCholeskyOrth(S,chtol,tol);
+
+    // Check smallest eigenvalue.
+  } else if(Sval(0)>=tol) {
     // OK to use symmetric
     if(verbose) printf("Using symmetric orthogonalization.\n");
 
@@ -502,7 +537,7 @@ arma::mat pivoted_cholesky(const arma::mat & A, double eps, arma::uvec & pivot) 
   double error(arma::max(d));
 
   // Pivot index
-  arma::uvec pi(arma::linspace<arma::uvec>(0,d.n_elem-1,d.n_elem));
+  arma::uvec pi=pivot;
 
   while(error>eps && m<d.n_elem) {
     // Errors in pivoted order

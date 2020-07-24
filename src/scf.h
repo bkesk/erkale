@@ -172,7 +172,9 @@ enum guess_t {
   /// Huckel type guess
   HUCKEL_GUESS,
   /// Minimal basis SAP
-  MINSAP_GUESS
+  MINSAP_GUESS,
+  /// Gaussian-basis fit SAP
+  SAPFIT_GUESS
 };
 
 /// Perdew-Zunger SIC mode
@@ -200,8 +202,8 @@ enum pzham {
 enum pzham parse_pzham(const std::string & str);
 
 class SCF {
- protected:
- /// Overlap matrix
+protected:
+  /// Overlap matrix
   arma::mat S;
 
   /// Kinetic energy matrix
@@ -327,8 +329,15 @@ class SCF {
 
   /// List of frozen orbitals by symmetry group. index+1 is symmetry group, group 0 contains all non-frozen orbitals
   std::vector<arma::mat> freeze;
+  /// Helper for orthogonalization
+  arma::mat orthogonalization_helper(const arma::vec & Rsq, const arma::mat & S) const;
 
- public:
+  /// Construct SAP potential
+  arma::mat sap_potential() const;
+  /// Construct Gaussian-fit SAP potential
+  arma::mat sapfit_potential() const;
+
+public:
   /// Constructor
   SCF(const BasisSet & basis, Checkpoint & chkpt);
   ~SCF();
@@ -418,6 +427,10 @@ class SCF {
   void sap_guess(rscf_t & sol) const;
   /// Do SAP guess
   void sap_guess(uscf_t & sol) const;
+  /// Do Gaussian-fit SAP guess
+  void sapfit_guess(rscf_t & sol) const;
+  /// Do Gaussian-fit SAP guess
+  void sapfit_guess(uscf_t & sol) const;
 
   /// Exchange localization
   arma::mat exchange_localization(const arma::mat & Co, const arma::mat & Cv) const;
@@ -489,6 +502,8 @@ double electron_spread(const arma::mat & P, const BasisSet & basis);
 /// Determine amount of alpha and beta electrons based on multiplicity
 void get_Nel_alpha_beta(int Nel, int mult, int & Nel_alpha, int & Nel_beta);
 
+/// Parse DFT/SAP grid
+void parse_grid(dft_t & dft, const std::string & gridstr, const std::string & method);
 /// Parse DFT grid settings
 dft_t parse_dft(bool init);
 

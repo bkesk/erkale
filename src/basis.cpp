@@ -231,6 +231,15 @@ void GaussianShell::convert_contraction() {
     c[i].c*=fac*pow(c[i].z,am/2.0+0.75);
 }
 
+void GaussianShell::convert_sap_contraction() {
+  // Convert contraction from contraction of normalized density
+  // gaussians to contraction of unnormalized gaussians.
+
+  if(am != 0) throw std::logic_error("SAP basis should only have S functions!\n");
+  for(size_t i=0;i<c.size();i++)
+    c[i].c*=pow(c[i].z/M_PI,1.5);
+}
+
 void GaussianShell::normalize(bool coeffs) {
   // Normalize contraction of unnormalized primitives wrt first function on shell
 
@@ -1641,6 +1650,26 @@ size_t BasisSet::get_first_ind(size_t num) const {
 
 size_t BasisSet::get_last_ind(size_t num) const {
   return shells[num].get_last_ind();
+}
+
+arma::vec BasisSet::get_bf_Rsquared() const {
+  arma::vec Rsq(get_Nbf());
+  for(size_t i=0;i<shells.size();i++) {
+    // First function on shell
+    size_t i0=shells[i].get_first_ind();
+    // Number of functions
+    size_t nbf=shells[i].get_Nbf();
+
+    // Get coordinates of shell center
+    coords_t cen=shells[i].get_center();
+    // Calculate moment integrals
+    std::vector<arma::mat> mom2=shells[i].moment(2, cen.x, cen.y, cen.z, shells[i]);
+    // Compute spatial extents
+    for(size_t fi=0;fi<nbf;fi++)
+      Rsq(i0+fi)=mom2[getind(2,0,0)](fi,fi)+mom2[getind(0,2,0)](fi,fi)+mom2[getind(0,0,2)](fi,fi);
+  }
+
+  return Rsq;
 }
 
 arma::uvec BasisSet::shell_indices() const {
@@ -3650,6 +3679,49 @@ arma::vec compute_orbitals(const arma::mat & C, const BasisSet & bas, const coor
   arma::rowvec orbs=arma::trans(bf)*C;
 
   return arma::trans(orbs);
+}
+
+arma::mat fermi_lowdin_orbitals(const arma::mat & C, const BasisSet & bas, const arma::mat & r) {
+  if(r.n_cols!=3)
+    throw std::logic_error("r should have three columns for x, y, z!\n");
+  if(r.n_rows != C.n_cols)
+    throw std::logic_error("r should have as many rows as there are orbitals to localize!\n");
+  if(C.n_rows != bas.get_Nbf())
+    throw std::logic_error("C does not correspond to basis set!\n");
+
+  // Evaluate basis function matrix: Nbf x nFOD
+  arma::mat bf(bas.get_Nbf(), r.n_rows);
+  for(size_t i=0;i<r.n_rows;i++)
+    bf.col(i)=bas.eval_func(r(i,0),r(i,1),r(i,2));
+  // Compute the values of the orbitals at the FODs
+  arma::mat g(bf.t()*C); // nFOD x Nmo
+  g.print("Orbitals' values at FODs");
+  // Value of electron density at the FODs
+  arma::vec n(arma::sqrt(arma::sum(arma::pow(g.t(),2))).t());
+
+  // T matrix (T_{ij}=g_j (r_i) / sqrt(n(r_i)/2))
+  arma::mat T(r.n_rows, r.n_rows);
+  for(size_t j=0;j<r.n_rows;j++)
+    T.col(j)=g.col(j)/n;
+
+  arma::square(n).print("Electron density at FODs");
+
+  // Form unitary transform
+  arma::mat TTt(T*T.t());
+  arma::vec tval;
+  arma::mat tvec;
+  arma::eig_sym(tval,tvec,TTt);
+
+  arma::mat invsqrtTTt(tvec*arma::diagmat(arma::pow(tval,-0.5))*tvec.t());
+  arma::mat U(invsqrtTTt*T);
+
+  // Orbitals are rotated as C -> C U^T
+  U=U.t();
+
+  arma::mat grot(g*U);
+  grot.print("FLO values at FODs");
+
+  return U;
 }
 
 double compute_density(const arma::mat & P, const BasisSet & bas, const coords_t & r) {

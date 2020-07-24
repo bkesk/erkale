@@ -301,6 +301,8 @@ class BasisSet {
   /// Get index of last function on shell
   size_t get_last_ind(size_t shind) const;
 
+  /// Get R^2 expectation value (measure of basis function extent)
+  arma::vec get_bf_Rsquared() const;
   /// Get shell indices of basis functions
   arma::uvec shell_indices() const;
   /// Find shell index of basis function
@@ -554,6 +556,12 @@ class GaussianShell {
    */
   void convert_contraction();
 
+  /**
+   * Convert contraction from coefficients of normalized density
+   * primitives to those of unnormalized primitives.
+   */
+  void convert_sap_contraction();
+
   /// Normalize contractions
   void normalize(bool coeffs=true);
   /// Normalize contractions in Coulomb norm (for density fitting)
@@ -663,6 +671,8 @@ void construct_basis(BasisSet & basis, const std::vector<nucleus_t> & nuclei, co
 
 /// Compute values of orbitals at given point
 arma::vec compute_orbitals(const arma::mat & C, const BasisSet & bas, const coords_t & r);
+/// Compute Fermi-Löwdin orbitals
+arma::mat fermi_lowdin_orbitals(const arma::mat & C, const BasisSet & bas, const arma::mat & r);
 
 /// Compute density at given point
 double compute_density(const arma::mat & P, const BasisSet & bas, const coords_t & r);

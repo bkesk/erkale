@@ -20,6 +20,7 @@
 #include <climits>
 
 #include "basis.h"
+#include "basislibrary.h"
 #include "broyden.h"
 #include "checkpoint.h"
 #include "elements.h"
@@ -57,6 +58,8 @@ enum guess_t parse_guess(const std::string & val) {
     return GSAP_GUESS;
   else if(stricmp(val,"SAP")==0)
     return SAP_GUESS;
+  else if(stricmp(val,"SAPFIT")==0)
+    return SAPFIT_GUESS;
   else if(stricmp(val,"MINSAP")==0)
     return MINSAP_GUESS;
   else if(stricmp(val,"SADNO")==0 || stricmp(val,"NO")==0)
@@ -252,10 +255,7 @@ SCF::SCF(const BasisSet & basis, Checkpoint & chkpt) {
     size_t nmo=0;
     for(size_t i=0;i<muni.n_elem;i++) {
       m_idx[i]=basisp->m_indices(muni[i]);
-
-      // Form S submatrix
-      arma::mat Ssub(S.submat(m_idx[i],m_idx[i]));
-      Sinvhs[i]=BasOrth(Ssub);
+      Sinvhs[i]=BasOrth(S(m_idx[i],m_idx[i]));
       nmo+=Sinvhs[i].n_cols;
     }
 
@@ -975,42 +975,176 @@ void SCF::gwh_guess(uscf_t & sol, double K) const {
   sol.Hb=sol.Ha;
 }
 
-void SCF::sap_guess(rscf_t & sol) const {
+arma::mat SCF::sap_potential() const {
+  Timer t;
+
   DFTGrid grid(basisp);
 
-  // Use a (99,590) grid
-  int nrad=99;
-  int lmax=41;
-  bool grad=false;
-  bool tau=false;
-  bool lapl=false;
-  bool strict=false;
-  bool nl=false;
-  grid.construct(nrad,lmax,grad,tau,lapl,strict,nl);
+  // Get the grid settings
+  dft_t dft=parse_dft(false);
+  // Check for SAP grid override
+  if(stricmp(settings.get_string("SAPGrid"),"")!=0) {
+    parse_grid(dft,settings.get_string("SAPGrid"),"SAP");
+  }
+  // Use the same grid as for dft
+  if(dft.adaptive) {
+    grid.construct_becke(dft.gridtol);
+  } else {
+    int nrad=dft.nrad;
+    int lmax=dft.lmax;
+    bool grad=false;
+    bool tau=false;
+    bool lapl=false;
+    bool strict=false;
+    bool nl=false;
+    grid.construct(nrad,lmax,grad,tau,lapl,strict,nl);
+  }
 
-  // Get SAP potential
-  arma::mat Vsap(grid.eval_SAP());
-  // Approximate Hamiltonian is
-  sol.H=Hcore+Vsap;
+  // Get SAP potential by quadrature
+  arma::mat Jx(grid.eval_SAP());
+
+  if(verbose)
+    printf("SAP potential formed in %.3f s.\n",t.get());
+
+  return Jx;
+}
+
+void SCF::sap_guess(rscf_t & sol) const {
+  sol.H=Hcore+sap_potential();
 }
 
 void SCF::sap_guess(uscf_t & sol) const {
-  DFTGrid grid(basisp);
+  sol.Ha=Hcore+sap_potential();
+  sol.Hb=sol.Ha;
+}
 
-  // Use a (99,590) grid
-  int nrad=99;
-  int lmax=41;
-  bool grad=false;
-  bool tau=false;
-  bool lapl=false;
-  bool strict=false;
-  bool nl=false;
-  grid.construct(nrad,lmax,grad,tau,lapl,strict,nl);
+arma::mat SCF::sapfit_potential() const {
+  Timer t;
 
-  // Get SAP potential
-  arma::mat Vsap(grid.eval_SAP());
-  // Approximate Hamiltonian is
-  sol.Ha=Hcore+Vsap;
+  // Load SAP fitting basis
+  BasisSetLibrary sapfit;
+  sapfit.load_basis(settings.get_string("SAPBasis"));
+
+  // Get shells in orbital basis
+  std::vector<GaussianShell> shells=basisp->get_shells();
+  // Get list of shell pairs
+  double omega=0.0;
+  double alpha=1.0;
+  double beta=0.0;
+  arma::mat Q, M;
+  std::vector<eripair_t> shpairs=basisp->get_eripairs(Q,M,intthr,omega,alpha,beta,false);
+  // and nuclei
+  std::vector<nucleus_t> nuclei=basisp->get_nuclei();
+  printf("%i shell pairs and %i nuclei\n",(int) shpairs.size(), (int) nuclei.size());
+
+  // Construct repulsive potential
+  arma::mat Jx(Hcore.n_rows,Hcore.n_cols);
+  Jx.zeros();
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+  {
+    ERIWorker *eri=new ERIWorker(basisp->get_max_am(),std::max(basisp->get_max_Ncontr(), sapfit.get_max_Ncontr()));
+    const std::vector<double> * erip;
+
+    // Dummy shell
+    GaussianShell dummy(dummyshell());
+
+    // Compute all repulsion integrals
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic,1)
+#endif
+    for(size_t ip=0;ip<shpairs.size();ip++) {
+      size_t is=shpairs[ip].is;
+      size_t js=shpairs[ip].js;
+
+      // We have already computed the Schwarz screening
+      double QQ=Q(is,js)*Q(is,js);
+      if(QQ<intthr)
+        // Small integral
+        continue;
+
+      // Loop over nuclei
+      for(size_t inuc=0;inuc<nuclei.size();inuc++) {
+        if(nuclei[inuc].bsse)
+          continue;
+
+        // Get the SAP basis for the element
+        ElementBasisSet sapbas;
+        try {
+          // Check first if a special set is wanted for given center
+          sapbas=sapfit.get_element(nuclei[inuc].symbol,inuc+1);
+        } catch(std::runtime_error & err) {
+          // Did not find a special basis, use the general one instead.
+          sapbas=sapfit.get_element(nuclei[inuc].symbol,0);
+        }
+
+        // Get the shells on the element
+        std::vector<FunctionShell> bf=sapbas.get_shells();
+        if(bf.size() != 1 || bf[0].get_am() != 0)
+          throw std::logic_error("SAP basis should only have a single contracted S function per element!\n");
+        // Check sum rule
+        std::vector<contr_t> contr(bf[0].get_contr());
+        double Zsap=0.0;
+        for(size_t i=0;i<contr.size();i++)
+          Zsap-=contr[i].c;
+        if(std::abs(Zsap - nuclei[inuc].Z) >= 1e-3) {
+          std::ostringstream oss;
+          oss << "SAP basis on nucleus " << inuc+1 << " violates sum rule: " << Zsap << " instead of expected " << nuclei[inuc].Z << "!\n";
+          throw std::logic_error(oss.str());
+        }
+
+        // Form the SAP shell
+        GaussianShell sapsh(GaussianShell(bf[0].get_am(),false,bf[0].get_contr()));
+        // and set its center
+        sapsh.set_center(nuclei[inuc].r,inuc);
+        // Convert the contraction to unnormalized primitives
+        sapsh.convert_sap_contraction();
+
+        // Compute integrals
+        eri->compute(&shells[is],&shells[js],&sapsh,&dummy);
+        erip=eri->getp();
+
+        // and store them
+        size_t Ni(shells[is].get_Nbf());
+        size_t Nj(shells[js].get_Nbf());
+        size_t i0(shells[is].get_first_ind());
+        size_t j0(shells[js].get_first_ind());
+
+        // Remember minus sign from V(r)=-Z(r)/r
+        for(size_t ii=0;ii<Ni;ii++)
+          for(size_t jj=0;jj<Nj;jj++) {
+            size_t i=i0+ii;
+            size_t j=j0+jj;
+            Jx(i,j) -= (*erip)[ii*Nj+jj];
+          }
+        if(is != js) {
+          // Symmetrize
+          for(size_t ii=0;ii<Ni;ii++)
+            for(size_t jj=0;jj<Nj;jj++) {
+              size_t i=i0+ii;
+              size_t j=j0+jj;
+              Jx(j,i) -= (*erip)[ii*Nj+jj];
+            }
+        }
+      }
+    }
+
+    delete eri;
+  }
+
+  if(verbose)
+    printf("SAP potential formed in %.3f s.\n",t.get());
+
+  return Jx;
+}
+
+void SCF::sapfit_guess(rscf_t & sol) const {
+  sol.H=Hcore+sapfit_potential();
+}
+
+void SCF::sapfit_guess(uscf_t & sol) const {
+  sol.Ha=Hcore+sapfit_potential();
   sol.Hb=sol.Ha;
 }
 
@@ -1637,7 +1771,7 @@ dft_t parse_pzmet(const std::string & pzmod, const dft_t & method) {
   return oomethod;
 }
 
-int parse_pzimag(const std::string & str) {
+int parse_pzimag(const std::string & str, const std::string & setting) {
   int ret;
   if(stricmp(str,"true")==0 || stricmp(str,"yes")==0)
     ret=1;
@@ -1645,8 +1779,15 @@ int parse_pzimag(const std::string & str) {
     ret=-1;
   else if(stricmp(str,"false")==0 || stricmp(str,"no")==0)
     ret=0;
-  else
-    throw std::logic_error("Invalid value for PZimag\n");
+  else {
+    // Try to parse number
+    int num;
+    if(sscanf(str.c_str(), "%d", &num)==1) {
+      ret=num;
+    } else {
+      throw std::logic_error("Invalid value \"" + str + "\" for " + setting + "\n");
+    }
+  }
   return ret;
 }
 
@@ -1659,6 +1800,41 @@ pz_scaling_t parse_pzscale(const std::string & scale) {
     return PZ_SCALE_KINETIC;
 
   throw std::runtime_error("Setting \"" + scale + "\" not recognized!\n");
+}
+
+void parse_grid(dft_t & dft, const std::string & gridstr, const std::string & method) {
+  std::vector<std::string> opts=splitline(gridstr);
+  if(opts.size()!=2) {
+    throw std::runtime_error("Invalid " + method + " grid specified.\n");
+  }
+
+  dft.adaptive=false;
+  dft.nrad=readint(opts[0]);
+  dft.lmax=readint(opts[1]);
+  if(dft.nrad<1 || dft.lmax==0) {
+    throw std::runtime_error("Invalid " + method + " radial grid specified.\n");
+  }
+
+  // Check if l was given in number of points
+  if(dft.lmax<0) {
+    // Try to find corresponding Lebedev grid
+    for(size_t i=0;i<sizeof(lebedev_degrees)/sizeof(lebedev_degrees[0]);i++)
+      if(lebedev_degrees[i]==-dft.lmax) {
+        dft.lmax=lebedev_orders[i];
+        break;
+      }
+    if(dft.lmax<0) {
+      std::ostringstream oss;
+      oss << "Invalid DFT angular grid specified. Supported Lebedev grids:";
+      for(size_t i=0;i<sizeof(lebedev_degrees)/sizeof(lebedev_degrees[0]);i++) {
+        if(i)
+          oss << ",";
+        oss << " " << lebedev_degrees[i];
+      }
+      oss << ".\n";
+      throw std::runtime_error(oss.str());
+    }
+  }
 }
 
 dft_t parse_dft(bool init) {
@@ -1676,39 +1852,7 @@ dft_t parse_dft(bool init) {
 
   // Use static grid?
   if(stricmp(settings.get_string("DFTGrid"),"Auto")!=0) {
-    std::vector<std::string> opts=splitline(settings.get_string("DFTGrid"));
-    if(opts.size()!=2) {
-      throw std::runtime_error("Invalid DFT grid specified.\n");
-    }
-
-    dft.adaptive=false;
-    dft.nrad=readint(opts[0]);
-    dft.lmax=readint(opts[1]);
-    if(dft.nrad<1 || dft.lmax==0) {
-      throw std::runtime_error("Invalid DFT radial grid specified.\n");
-    }
-
-    // Check if l was given in number of points
-    if(dft.lmax<0) {
-      // Try to find corresponding Lebedev grid
-      for(size_t i=0;i<sizeof(lebedev_degrees)/sizeof(lebedev_degrees[0]);i++)
-	if(lebedev_degrees[i]==-dft.lmax) {
-	  dft.lmax=lebedev_orders[i];
-	  break;
-	}
-      if(dft.lmax<0) {
-	std::ostringstream oss;
-	oss << "Invalid DFT angular grid specified. Supported Lebedev grids:";
-	for(size_t i=0;i<sizeof(lebedev_degrees)/sizeof(lebedev_degrees[0]);i++) {
-	  if(i)
-	    oss << ",";
-	  oss << " " << lebedev_degrees[i];
-	}
-	oss << ".\n";
-	throw std::runtime_error(oss.str());
-      }
-    }
-
+    parse_grid(dft, settings.get_string("DFTGrid"), "DFT");
   } else {
     dft.adaptive=true;
     dft.gridtol=settings.get_double(tolkw);
@@ -1809,6 +1953,10 @@ void calculate(const BasisSet & basis, bool force) {
 
   if(!hf && !rohf) {
     parse_xc_func(dft.x_func,dft.c_func,settings.get_string("Method"));
+    if(!is_supported(dft.x_func))
+      throw std::logic_error("The exchange functional is not supported in ERKALE.\n");
+    if(!is_supported(dft.c_func))
+      throw std::logic_error("The correlation functional is not supported in ERKALE.\n");
 
     initdft=parse_dft(true);
     dft=parse_dft(false);
@@ -1939,6 +2087,9 @@ void calculate(const BasisSet & basis, bool force) {
       } else if(guess==SAP_GUESS) {
 	solver.sap_guess(sol);
         solver.diagonalize(sol);
+      } else if(guess==SAPFIT_GUESS) {
+	solver.sapfit_guess(sol);
+        solver.diagonalize(sol);
       } else if(guess==MINSAP_GUESS) {
         // Form SAP Hamiltonian
 	solver.sap_guess(sol);
@@ -2027,7 +2178,7 @@ void calculate(const BasisSet & basis, bool force) {
       int pzprec=settings.get_int("PZprec");
       bool pzov=settings.get_bool("PZov");
       bool pzoo=settings.get_bool("PZoo");
-      int pzloc=parse_pzimag(settings.get_string("PZloc"));
+      int pzloc=parse_pzimag(settings.get_string("PZloc"),"PZloc");
       enum locmet pzlocmet=parse_locmet(settings.get_string("PZlocmet"));
       double pzw=settings.get_double("PZw");
       int pzmax=settings.get_int("PZiter");
@@ -2036,7 +2187,7 @@ void calculate(const BasisSet & basis, bool force) {
       double pzOVthr=settings.get_double("PZOVthr");
       double pzNRthr=settings.get_double("PZNRthr");
       double pzEthr=settings.get_double("PZEthr");
-      int pzimag=parse_pzimag(settings.get_string("PZimag"));
+      int pzimag=parse_pzimag(settings.get_string("PZimag"),"PZimag");
       int pzstab=settings.get_int("PZstab");
       double pzstabthr=-settings.get_double("PZstabThr"); // Minus sign!
       int seed=settings.get_int("PZseed");
@@ -2134,7 +2285,21 @@ void calculate(const BasisSet & basis, bool force) {
 	  sol.cC.cols(0,Nel_alpha-1)=sol.C.cols(0,Nel_alpha-1)*W;
 	  if(sol.C.n_cols>(size_t) Nel_alpha)
 	    sol.cC.cols(Nel_alpha,sol.C.n_cols-1)=sol.C.cols(Nel_alpha,sol.C.n_cols-1)*COMPLEX1;
-	}
+	} else if(pzloc==2) {
+          // Initialize with Fermi-Lowdin orbitals
+          if(verbose) printf("\nInitializing with Fermi-Lowdin orbitals.\n");
+          arma::mat fod;
+          fod.load("fod.dat",arma::raw_ascii);
+          // Convert to bohr
+          fod*=ANGSTROMINBOHR;
+          arma::mat Cocc(sol.C.cols(0,Nel_alpha-1));
+          arma::mat Wflo(fermi_lowdin_orbitals(Cocc,basis,fod));
+	  // Save the complex orbitals
+	  sol.cC.zeros(sol.C.n_rows,sol.C.n_cols);
+	  sol.cC.cols(0,Nel_alpha-1)=(Cocc*Wflo)*COMPLEX1;
+	  if(sol.C.n_cols>(size_t) Nel_alpha)
+	    sol.cC.cols(Nel_alpha,sol.C.n_cols-1)=sol.C.cols(Nel_alpha,sol.C.n_cols-1)*COMPLEX1;
+        }
 
 	// Save the orbitals
 	chkpt.cwrite("CW",sol.cC);
@@ -2285,6 +2450,9 @@ void calculate(const BasisSet & basis, bool force) {
       } else if(guess==SAP_GUESS) {
 	solver.sap_guess(sol);
         solver.diagonalize(sol);
+      } else if(guess==SAPFIT_GUESS) {
+	solver.sapfit_guess(sol);
+        solver.diagonalize(sol);
       } else if(guess==MINSAP_GUESS) {
         // Form SAP Hamiltonian
 	solver.sap_guess(sol);
@@ -2392,7 +2560,7 @@ void calculate(const BasisSet & basis, bool force) {
       int pzprec=settings.get_int("PZprec");
       bool pzov=settings.get_bool("PZov");
       bool pzoo=settings.get_bool("PZoo");
-      int pzloc=parse_pzimag(settings.get_string("PZloc"));
+      int pzloc=parse_pzimag(settings.get_string("PZloc"),"PZloc");
       enum locmet pzlocmet=parse_locmet(settings.get_string("PZlocmet"));
       double pzw=settings.get_double("PZw");
       int pzmax=settings.get_int("PZiter");
@@ -2401,7 +2569,7 @@ void calculate(const BasisSet & basis, bool force) {
       double pzOVthr=settings.get_double("PZOVthr");
       double pzEthr=settings.get_double("PZEthr");
       double pzNRthr=settings.get_double("PZNRthr");
-      int pzimag=parse_pzimag(settings.get_string("PZimag"));
+      int pzimag=parse_pzimag(settings.get_string("PZimag"),"PZimag");
       int pzstab=settings.get_int("PZstab");
       double pzstabthr=-settings.get_double("PZstabThr"); // Minus sign!
       int seed=settings.get_int("PZseed");
@@ -2502,7 +2670,21 @@ void calculate(const BasisSet & basis, bool force) {
 	  sol.cCa.cols(0,Nel_alpha-1)=sol.Ca.cols(0,Nel_alpha-1)*Wa;
 	  if(sol.Ca.n_cols>(size_t) Nel_alpha)
 	    sol.cCa.cols(Nel_alpha,sol.Ca.n_cols-1)=sol.Ca.cols(Nel_alpha,sol.Ca.n_cols-1)*COMPLEX1;
-	}
+	} else if(pzloc==2) {
+          // Initialize with Fermi-Lowdin orbitals
+          if(verbose) printf("\nInitializing with Fermi-Lowdin orbitals.\n");
+          arma::mat fod;
+          fod.load("fod-a.dat",arma::raw_ascii);
+          // Convert to bohr
+          fod*=ANGSTROMINBOHR;
+          arma::mat Cocc(sol.Ca.cols(0,Nel_alpha-1));
+          arma::mat Wflo(fermi_lowdin_orbitals(Cocc,basis,fod));
+	  // Save the complex orbitals
+	  sol.cCa.zeros(sol.Ca.n_rows,sol.Ca.n_cols);
+	  sol.cCa.cols(0,Nel_alpha-1)=(Cocc*Wflo)*COMPLEX1;
+	  if(sol.Ca.n_cols>(size_t) Nel_alpha)
+	    sol.cCa.cols(Nel_alpha,sol.Ca.n_cols-1)=sol.Ca.cols(Nel_alpha,sol.Ca.n_cols-1)*COMPLEX1;
+        }
 
 	// The localizing matrix
 	arma::cx_mat Wb;
@@ -2570,7 +2752,21 @@ void calculate(const BasisSet & basis, bool force) {
 	  sol.cCb.cols(0,Nel_beta-1)=sol.Cb.cols(0,Nel_beta-1)*Wb;
 	  if(sol.Cb.n_cols>(size_t) Nel_beta)
 	    sol.cCb.cols(Nel_beta,sol.Cb.n_cols-1)=sol.Cb.cols(Nel_beta,sol.Cb.n_cols-1)*COMPLEX1;
-	}
+	} else if(pzloc==2) {
+          // Initialize with Fermi-Lowdin orbitals
+          if(verbose) printf("\nInitializing with Fermi-Lowdin orbitals.\n");
+          arma::mat fod;
+          fod.load("fod-b.dat",arma::raw_ascii);
+          // Convert to bohr
+          fod*=ANGSTROMINBOHR;
+          arma::mat Cocc(sol.Cb.cols(0,Nel_beta-1));
+          arma::mat Wflo(fermi_lowdin_orbitals(Cocc,basis,fod));
+	  // Save the complex orbitals
+	  sol.cCb.zeros(sol.Cb.n_rows,sol.Cb.n_cols);
+	  sol.cCb.cols(0,Nel_beta-1)=(Cocc*Wflo)*COMPLEX1;
+	  if(sol.Cb.n_cols>(size_t) Nel_beta)
+	    sol.cCb.cols(Nel_beta,sol.Cb.n_cols-1)=sol.Cb.cols(Nel_beta,sol.Cb.n_cols-1)*COMPLEX1;
+        }
 
 	PZStability stab(&solver,verbose);
 	stab.set_method(dft,oodft,pzw,pzscale,pzscaleexp);

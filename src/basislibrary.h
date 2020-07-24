@@ -75,6 +75,8 @@ class FunctionShell {
 
   /// Get angular momentum
   int get_am() const;
+  /// Get contraction length
+  size_t get_Ncontr() const;
 
   /// Get contraction coefficients
   std::vector<contr_t> get_contr() const;
@@ -172,6 +174,8 @@ class ElementBasisSet {
   int get_am(size_t ind) const;
   /// Get amount of functions
   int get_Nbf() const;
+  /// Get maximum contraction depth
+  size_t get_max_Ncontr() const;
 
   /// Normalize coefficients
   void normalize();
@@ -199,8 +203,10 @@ class ElementBasisSet {
   /// Form compact Cholesky set
   ElementBasisSet cholesky_set(double thr, int maxam, double ovlthr) const;
 
-  /// Augment the basis
-  void augment(int naug);
+  /// Augment the basis with steep functions
+  void augment_steep(int naug);
+  /// Augment the basis with diffuse functions
+  void augment_diffuse(int naug);
 
   friend class BasisSetLibrary;
 };
@@ -273,6 +279,8 @@ class BasisSetLibrary {
 
   /// Get maximum angular momentum used in basis set
   int get_max_am() const;
+  /// Get maximum contraction depth
+  size_t get_max_Ncontr() const;
 
   /// Get basis set for wanted element
   ElementBasisSet get_element(std::string el, size_t number=0) const;
@@ -305,8 +313,10 @@ class BasisSetLibrary {
   /// Merge primitives with large overlap (also decontracts basis)
   void merge(double cutoff=0.9, bool verbose=true);
 
-  /// Augment the basis
-  void augment(int naug);
+  /// Augment the basis with steep functions
+  void augment_steep(int naug);
+  /// Augment the basis with diffuse functions
+  void augment_diffuse(int naug);
 
   /// Print out library
   void print() const;

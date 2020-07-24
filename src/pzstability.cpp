@@ -900,6 +900,18 @@ arma::cx_mat PZStability::unified_H(const arma::cx_mat & CO, const arma::cx_mat 
   return H;
 }
 
+arma::mat PZStability::centroids(const arma::cx_mat & CO) const {
+  // Get moment matrix
+  std::vector<arma::mat> mommat=basis.moment(1);
+
+  arma::mat cen(mommat.size(),CO.n_cols);
+  for(size_t io=0;io<CO.n_cols;io++)
+    for(size_t ic=0;ic<mommat.size();ic++)
+      cen(ic,io)=arma::as_scalar(arma::real(CO.col(io).t()*mommat[ic]*CO.col(io)));
+
+  return cen;
+}
+
 void PZStability::print_info(const arma::cx_mat & CO, const arma::cx_mat & CV, const std::vector<arma::cx_mat> & Forb, const arma::cx_mat & H0, const arma::vec & Eorb, const arma::vec & worb) {
   if(!verbose) return;
 
@@ -958,6 +970,13 @@ void PZStability::print_info(const arma::cx_mat & CO, const arma::cx_mat & CV, c
       fflush(stdout);
     }
   }
+
+  printf("Orbital centroids:\n");
+  arma::mat cen(centroids(CO));
+  // Convert to angstrom
+  cen*=BOHRINANGSTROM;
+  for(size_t io=0;io<cen.n_cols;io++)
+    printf("%3i % .6f % .6f % .6f\n",(int) io+1, cen(0,io), cen(1,io), cen(2,io));
 }
 
 void PZStability::print_info() {
@@ -981,6 +1000,12 @@ void PZStability::print_info() {
 
     // Diagonalize
     print_info(CO,CV,Forb,get_H(rsl),Eorb,worb);
+
+    // Density matrix
+    arma::mat P(arma::real(2.0*form_density(CO)));
+    arma::vec dipmom(dipole_moment(P,basis));
+    printf("Dipole mu = (% 08.8f, % 08.8f, % 08.8f) D\n",dipmom(0)/AUINDEBYE,dipmom(1)/AUINDEBYE,dipmom(2)/AUINDEBYE);
+
   } else {
     // Evaluate orbital matrices
     std::vector<arma::cx_mat> Forba, Forbb;
@@ -1000,6 +1025,11 @@ void PZStability::print_info() {
     print_info(COa,CVa,Forba,get_H(usl,false),Eorba,worba);
     printf("\n **** Beta  orbitals ****\n");
     print_info(COb,CVb,Forbb,get_H(usl,true),Eorbb,worbb);
+
+    // Density matrix
+    arma::mat P(arma::real(form_density(COa)+form_density(COb)));
+    arma::vec dipmom(dipole_moment(P,basis));
+    printf("Dipole mu = (% 08.8f, % 08.8f, % 08.8f) D\n",dipmom(0)/AUINDEBYE,dipmom(1)/AUINDEBYE,dipmom(2)/AUINDEBYE);
   }
 
   // Print total energy and its components
@@ -1455,24 +1485,9 @@ arma::vec PZStability::gradient() {
   return gradient(x, true);
 }
 
-static arma::mat precondition_matrix(const arma::vec & Eo, const arma::vec & Ev, double dH) {
-  // Demand that all scalings are within this range
-  double min=1e-2;
-  double max=1/min;
-
-  arma::mat ret(Eo.n_elem,Ev.n_elem);
-  for(size_t io=0;io<ret.n_rows;io++)
-    for(size_t iv=0;iv<ret.n_cols;iv++) {
-      ret(io,iv)=1.0/(Ev(iv)-Eo(io)+dH);
-      if(ret(io,iv)<min) ret(io,iv)=min;
-      else if(ret(io,iv)>max) ret(io,iv)=max;
-    }
-  return ret;
-}
-
 static arma::mat precondition_matrix(const arma::mat & Ediff, double dH) {
   // Demand that all scalings are within this range
-  double min=1e-2;
+  double min=1e-6;
   double max=1/min;
 
   arma::mat ret(Ediff.n_rows,Ediff.n_cols);
@@ -1484,6 +1499,15 @@ static arma::mat precondition_matrix(const arma::mat & Ediff, double dH) {
     }
   return ret;
 }
+
+static arma::mat precondition_matrix(const arma::vec & Eo, const arma::vec & Ev, double dH) {
+  arma::mat Ediff(Eo.n_elem,Ev.n_elem);
+  for(size_t io=0;io<Eo.n_elem;io++)
+    for(size_t iv=0;iv<Ev.n_elem;iv++)
+      Ediff(io,iv)=Ev(iv)-Eo(io);
+  return precondition_matrix(Ediff,dH);
+}
+
 
 arma::cx_mat PZStability::get_CO(const rscf_t & sol) const {
   if(!restr)
@@ -2062,6 +2086,10 @@ double PZStability::optimize(size_t maxiter, double gthr, double nrthr, double d
 
   // Make sure all data is on the checkpoint file
   update(x0);
+  // Update reference
+  update_reference(true);
+  // Print info
+  print_info();
 
   // Evaluate energy
   double ival=eval(x0);
